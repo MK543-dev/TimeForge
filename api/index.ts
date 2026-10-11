@@ -1,7 +1,10 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import app from '../server';
+import app from '../server.js';
 
-export default function handler(req: VercelRequest, res: VercelResponse) {
+export default function handler(
+  req: VercelRequest,
+  res: VercelResponse
+) {
   const matchedPath =
     req.headers['x-matched-path'] ||
     req.headers['x-vercel-matched-path'];
