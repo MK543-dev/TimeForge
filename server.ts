@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
+import mysql from 'mysql2/promise';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 
@@ -101,14 +102,14 @@ interface ServerDailyCompletion {
 let DB_DAILY_TASKS: ServerDailyTaskDef[] = [
   { id: 'dt_1', user_id: 'usr_1', order: 1, title: 'Wake-Up', time_slot: '5:00 - 5:30', duration_minutes: 30, category: 'Morning Routine & Fitness', notes: 'Early morning wake-up and hydration (5:00 - 5:30)', icon: 'Sun' },
   { id: 'dt_2', user_id: 'usr_1', order: 2, title: "Qur'an Reading", time_slot: '15mins', duration_minutes: 15, category: "Spiritual & Qur'an", notes: "Daily Qur'an recitation and spiritual focus (15 mins)", icon: 'BookOpen' },
-  { id: 'dt_3', user_id: 'usr_1', order: 3, title: 'Walking', time_slot: '1-1/2 hr', duration_minutes: 90, category: 'Morning Routine & Fitness', notes: 'Morning walking exercise and fresh air (1-1/2 hr)', icon: 'Activity' },
-  { id: 'dt_4', user_id: 'usr_1', order: 4, title: 'Rgular-class', time_slot: '10:30 - 1:31', duration_minutes: 181, category: 'Core Academic Classes', notes: 'University & department regular lecture blocks (10:30 - 1:31)', icon: 'GraduationCap' },
-  { id: 'dt_5', user_id: 'usr_1', order: 5, title: 'ML', time_slot: '1hr/30mins', duration_minutes: 90, category: 'Machine Learning (ML)', notes: 'Machine Learning model architecture & concepts (1hr/30mins)', icon: 'Cpu' },
-  { id: 'dt_6', user_id: 'usr_1', order: 6, title: 'Data Science Video', time_slot: '15-30mins', duration_minutes: 30, category: 'Data Science (DS)', notes: 'Data Science technical lecture or conceptual video (15-30mins)', icon: 'Video' },
-  { id: 'dt_7', user_id: 'usr_1', order: 7, title: 'PytonPractice', time_slot: '2-3hr', duration_minutes: 150, category: 'Python Programming', notes: 'Hands-on Python coding exercises & scripts (2-3hr)', icon: 'Code' },
+  { id: 'dt_3', user_id: 'usr_1', order: 3, title: 'Walking', time_slot: '1-1/2 hr', duration_minutes: 90, category: 'Morning Routine & Fitness', notes: 'Morning walking exercise and fresh air (1.5 hrs)', icon: 'Footprints' },
+  { id: 'dt_4', user_id: 'usr_1', order: 4, title: 'Rgular-class', time_slot: '10:30 - 1:31', duration_minutes: 181, category: 'Core Academic Classes', notes: 'University & department regular lecture / academic block', icon: 'GraduationCap' },
+  { id: 'dt_5', user_id: 'usr_1', order: 5, title: 'ML', time_slot: '1hr/30mins', duration_minutes: 90, category: 'Machine Learning (ML)', notes: 'Machine Learning model architecture & concepts (1.5 hrs)', icon: 'BrainCircuit' },
+  { id: 'dt_6', user_id: 'usr_1', order: 6, title: 'Data Science Video', time_slot: '15-30mins', duration_minutes: 30, category: 'Data Science (DS)', notes: 'Data Science technical lecture or concept review (15-30 mins)', icon: 'PlayCircle' },
+  { id: 'dt_7', user_id: 'usr_1', order: 7, title: 'PytonPractice', time_slot: '2-3hr', duration_minutes: 150, category: 'Python Programming', notes: 'Hands-on Python coding exercises & scripts (2-3 hrs)', icon: 'Code2' },
   { id: 'dt_8', user_id: 'usr_1', order: 8, title: 'SQL', time_slot: '30mins', duration_minutes: 30, category: 'SQL & Databases', notes: 'Relational queries, schema design & practice (30mins)', icon: 'Database' },
-  { id: 'dt_9', user_id: 'usr_1', order: 9, title: 'Communication', time_slot: '30min', duration_minutes: 30, category: 'Communication Skills', notes: 'Verbal, professional & presentation skills development (30min)', icon: 'MessageSquare' },
-  { id: 'dt_10', user_id: 'usr_1', order: 10, title: 'DSA', time_slot: '30mins', duration_minutes: 30, category: 'DSA & Problem Solving', notes: 'Data Structures and Algorithms LeetCode / problem solving (30mins)', icon: 'Layers' },
+  { id: 'dt_9', user_id: 'usr_1', order: 9, title: 'Communication', time_slot: '30min', duration_minutes: 30, category: 'Communication Skills', notes: 'Verbal, professional & presentation skills (30 min)', icon: 'MessageSquare' },
+  { id: 'dt_10', user_id: 'usr_1', order: 10, title: 'DSA', time_slot: '30mins', duration_minutes: 30, category: 'DSA & Problem Solving', notes: 'Data Structures and Algorithms LeetCode / problem practice (30 mins)', icon: 'Cpu' },
 ];
 
 const DEFAULT_DAILY_TASKS_BACKUP: ServerDailyTaskDef[] = JSON.parse(JSON.stringify(DB_DAILY_TASKS));
@@ -309,6 +310,312 @@ export interface ServerSessionData {
 }
 const DB_SESSIONS = new Map<string, ServerSessionData>();
 
+// MySQL persistence support for persistent, user-specific application data.
+const MYSQL_ENABLED = Boolean(process.env.DB_HOST || process.env.DB_NAME || process.env.DB_USER || process.env.DB_PASSWORD);
+const MYSQL_CONFIG = {
+  host: process.env.DB_HOST || 'localhost',
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER || 'timeforge',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'timeforge',
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+  connectionLimit: 10,
+  waitForConnections: true,
+  queueLimit: 0,
+  charset: 'utf8mb4',
+};
+
+let MYSQL_POOL: Awaited<ReturnType<typeof mysql.createPool>> | null = null;
+
+async function initializeMysqlDatabase(): Promise<void> {
+  if (!MYSQL_ENABLED) return;
+  try {
+    const adminPool = mysql.createPool({
+      host: MYSQL_CONFIG.host,
+      port: MYSQL_CONFIG.port,
+      user: MYSQL_CONFIG.user,
+      password: MYSQL_CONFIG.password,
+      connectionLimit: 2,
+      waitForConnections: true,
+      charset: 'utf8mb4',
+    });
+
+    await adminPool.query(`CREATE DATABASE IF NOT EXISTS \`${MYSQL_CONFIG.database}\``);
+    await adminPool.end();
+
+    MYSQL_POOL = mysql.createPool({
+      ...MYSQL_CONFIG,
+      connectionLimit: 10,
+      waitForConnections: true,
+      queueLimit: 0,
+      multipleStatements: false,
+    });
+
+    const schema = [
+      `CREATE TABLE IF NOT EXISTS users (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        password VARCHAR(255) NULL,
+        role ENUM('admin','user','developer') NOT NULL DEFAULT 'user',
+        theme_pref VARCHAR(64) NULL,
+        streak_count INT DEFAULT 0,
+        longest_streak INT DEFAULT 0,
+        xp INT DEFAULT 0,
+        level INT DEFAULT 1,
+        avatar TEXT NULL,
+        department VARCHAR(255) NULL,
+        last_active_date DATE NULL,
+        last_streak_date DATE NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE TABLE IF NOT EXISTS sessions (
+        token VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL,
+        INDEX idx_sessions_user_id (user_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS daily_tasks (
+        id VARCHAR(128) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        \`order\` INT NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        time_slot VARCHAR(100) NULL,
+        duration_minutes INT NOT NULL,
+        category VARCHAR(255) NULL,
+        notes TEXT NULL,
+        icon VARCHAR(100) NULL,
+        INDEX idx_daily_tasks_user_id (user_id)
+      )`,
+      `CREATE TABLE IF NOT EXISTS daily_completions (
+        id VARCHAR(128) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        task_id VARCHAR(128) NOT NULL,
+        date DATE NOT NULL,
+        completed BOOLEAN NOT NULL DEFAULT false,
+        completed_at TIMESTAMP NULL,
+        INDEX idx_daily_completions_user_date (user_id, date)
+      )`,
+      `CREATE TABLE IF NOT EXISTS user_streaks (
+        user_id VARCHAR(64) PRIMARY KEY,
+        streak INT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )`,
+    ];
+
+    for (const statement of schema) {
+      await MYSQL_POOL.query(statement);
+    }
+
+    const loaded = await loadPersistedDataFromDatabase();
+    if (loaded) {
+      console.log('[MySQL] Loaded persisted user/task data from MySQL.');
+    }
+  } catch (error) {
+    console.warn('[MySQL] Database initialization failed; falling back to local JSON persistence:', error);
+    MYSQL_POOL = null;
+  }
+}
+
+async function loadPersistedDataFromDatabase(): Promise<boolean> {
+  if (!MYSQL_POOL) return false;
+
+  try {
+    const [userRows] = await MYSQL_POOL.query<any[]>('SELECT * FROM users');
+    if (Array.isArray(userRows) && userRows.length > 0) {
+      DB_USERS = userRows.map((u: any) => ({
+        id: String(u.id),
+        name: String(u.name),
+        email: String(u.email),
+        role: (u.role === 'admin' || u.role === 'developer' ? u.role : 'user') as 'admin' | 'user' | 'developer',
+        password: u.password || undefined,
+        theme_pref: u.theme_pref || undefined,
+        streak_count: u.streak_count ?? 0,
+        longest_streak: u.longest_streak ?? 0,
+        xp: u.xp ?? 0,
+        level: u.level ?? 1,
+        avatar: u.avatar || undefined,
+        department: u.department || undefined,
+        last_active_date: u.last_active_date || undefined,
+        last_streak_date: u.last_streak_date || undefined,
+        created_at: u.created_at || undefined,
+      }));
+    }
+
+    const [taskRows] = await MYSQL_POOL.query<any[]>('SELECT * FROM daily_tasks ORDER BY `order` ASC');
+    if (Array.isArray(taskRows)) {
+      DB_DAILY_TASKS = taskRows.map((t: any) => ({
+        id: String(t.id),
+        user_id: String(t.user_id),
+        order: Number(t.order ?? 0),
+        title: String(t.title),
+        time_slot: String(t.time_slot || ''),
+        duration_minutes: Number(t.duration_minutes ?? 0),
+        category: String(t.category || 'General'),
+        notes: t.notes || undefined,
+        icon: t.icon || undefined,
+      }));
+    }
+
+    const [completionRows] = await MYSQL_POOL.query<any[]>('SELECT * FROM daily_completions');
+    if (Array.isArray(completionRows)) {
+      DB_DAILY_COMPLETIONS = completionRows.map((c: any) => ({
+        id: String(c.id),
+        user_id: String(c.user_id),
+        task_id: String(c.task_id),
+        date: String(c.date),
+        completed: Boolean(c.completed),
+        completed_at: c.completed_at || undefined,
+      }));
+    }
+
+    const [streakRows] = await MYSQL_POOL.query<any[]>('SELECT user_id, streak FROM user_streaks');
+    if (Array.isArray(streakRows)) {
+      USER_STREAKS = Object.fromEntries(streakRows.map((r: any) => [String(r.user_id), Number(r.streak || 0)]));
+    }
+
+    const [sessionRows] = await MYSQL_POOL.query<any[]>('SELECT token, user_id, created_at, expires_at FROM sessions');
+    if (Array.isArray(sessionRows)) {
+      DB_SESSIONS.clear();
+      sessionRows.forEach((row: any) => {
+        if (row && row.token && row.expires_at > Date.now()) {
+          DB_SESSIONS.set(String(row.token), {
+            user_id: String(row.user_id),
+            created_at: Number(row.created_at),
+            expires_at: Number(row.expires_at),
+          });
+        }
+      });
+    }
+
+    return true;
+  } catch (error) {
+    console.warn('[MySQL] Failed to read rows from database:', error);
+    return false;
+  }
+}
+
+async function persistDataToDatabase(): Promise<void> {
+  if (!MYSQL_POOL) return;
+
+  try {
+    const userValues = DB_USERS.map((u) => [
+      u.id,
+      u.name,
+      u.email,
+      u.password || null,
+      u.role,
+      u.theme_pref || null,
+      u.streak_count ?? 0,
+      u.longest_streak ?? 0,
+      u.xp ?? 0,
+      u.level ?? 1,
+      u.avatar || null,
+      u.department || null,
+      u.last_active_date || null,
+      u.last_streak_date || null,
+      u.created_at || null,
+    ]);
+
+    if (userValues.length > 0) {
+      await MYSQL_POOL.query(
+        `INSERT INTO users (id, name, email, password, role, theme_pref, streak_count, longest_streak, xp, level, avatar, department, last_active_date, last_streak_date, created_at)
+         VALUES ?
+         ON DUPLICATE KEY UPDATE
+           name = VALUES(name),
+           email = VALUES(email),
+           password = VALUES(password),
+           role = VALUES(role),
+           theme_pref = VALUES(theme_pref),
+           streak_count = VALUES(streak_count),
+           longest_streak = VALUES(longest_streak),
+           xp = VALUES(xp),
+           level = VALUES(level),
+           avatar = VALUES(avatar),
+           department = VALUES(department),
+           last_active_date = VALUES(last_active_date),
+           last_streak_date = VALUES(last_streak_date),
+           created_at = VALUES(created_at)`,
+        [userValues as any]
+      );
+    }
+
+    const taskValues = DB_DAILY_TASKS.map((t) => [
+      t.id,
+      t.user_id,
+      t.order,
+      t.title,
+      t.time_slot,
+      t.duration_minutes,
+      t.category,
+      t.notes || null,
+      t.icon || null,
+    ]);
+
+    if (taskValues.length > 0) {
+      await MYSQL_POOL.query(
+        `INSERT INTO daily_tasks (id, user_id, \`order\`, title, time_slot, duration_minutes, category, notes, icon)
+         VALUES ?
+         ON DUPLICATE KEY UPDATE
+           user_id = VALUES(user_id),
+           \`order\` = VALUES(\`order\`),
+           title = VALUES(title),
+           time_slot = VALUES(time_slot),
+           duration_minutes = VALUES(duration_minutes),
+           category = VALUES(category),
+           notes = VALUES(notes),
+           icon = VALUES(icon)`,
+        [taskValues as any]
+      );
+    }
+
+    const completionValues = DB_DAILY_COMPLETIONS.map((c) => [
+      c.id,
+      c.user_id,
+      c.task_id,
+      c.date,
+      c.completed ? 1 : 0,
+      c.completed_at || null,
+    ]);
+
+    if (completionValues.length > 0) {
+      await MYSQL_POOL.query(
+        `INSERT INTO daily_completions (id, user_id, task_id, date, completed, completed_at)
+         VALUES ?
+         ON DUPLICATE KEY UPDATE
+           user_id = VALUES(user_id),
+           task_id = VALUES(task_id),
+           date = VALUES(date),
+           completed = VALUES(completed),
+           completed_at = VALUES(completed_at)`,
+        [completionValues as any]
+      );
+    }
+
+    const streakEntries = Object.entries(USER_STREAKS).map(([userId, streak]) => [userId, streak]);
+    if (streakEntries.length > 0) {
+      await MYSQL_POOL.query(
+        `INSERT INTO user_streaks (user_id, streak)
+         VALUES ?
+         ON DUPLICATE KEY UPDATE streak = VALUES(streak)`,
+        [streakEntries as any]
+      );
+    }
+
+    await MYSQL_POOL.query('DELETE FROM sessions');
+    const sessionEntries = Array.from(DB_SESSIONS.entries()).map(([token, data]) => [token, data.user_id, data.created_at, data.expires_at]);
+    if (sessionEntries.length > 0) {
+      await MYSQL_POOL.query(
+        `INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES ?`,
+        [sessionEntries as any]
+      );
+    }
+  } catch (error) {
+    console.warn('[MySQL] Failed to persist data to database:', error);
+  }
+}
+
 function initDataPersistence() {
   try {
     if (!fs.existsSync(STORAGE_DIR)) {
@@ -461,12 +768,14 @@ function persistDataToDisk() {
       sessions: Array.from(DB_SESSIONS.entries()),
     };
     fs.writeFileSync(STORAGE_FILE, JSON.stringify(payload, null, 2), 'utf-8');
+    void persistDataToDatabase();
   } catch (err) {
     console.warn('[Storage] Error persisting to disk:', err);
   }
 }
 
 initDataPersistence();
+void initializeMysqlDatabase();
 
 // Helper to determine if a user ID or email belongs to the developer / institutional admin
 function isDeveloperUser(userId?: string | null, email?: string | null): boolean {
@@ -2258,12 +2567,12 @@ app.post('/api/ai/agent-chat', async (req, res) => {
     if (!ai) {
       // High quality fallback coaching responses
       if (lowerMsg.includes('motivat') || lowerMsg.includes('inspire')) {
-        return sendResponse(`⚡ **Daily Motivation**: *"Small disciplines repeated with consistency every day lead to great achievements gained slowly over time."*\n\nYou have ${DB_DAILY_TASKS.length} deliberate routine items designed to anchor your mind and body. Attack your next 30-minute block with total immersion!`);
+        return sendResponse(`⚡ **Daily Motivation**: *"Small disciplines repeated with consistency every day lead to great achievements gained slowly over time."*\n\nYou have ${DB_DAILY_TASKS.length} routine items tracked and your momentum is rising. Keep the rhythm!`);
       }
       if (lowerMsg.includes('advice') || lowerMsg.includes('focus') || lowerMsg.includes('order')) {
-        return sendResponse(`🧠 **Routine Focus Strategy**:\n1. **Early Win**: Begin with your physical activation (Wake-up & Walking) to stimulate dopamine.\n2. **Deep Anchor**: Tackle core study or engineering blocks before midday while cognitive stamina is peaked.\n3. **Reflective Wind-down**: Close the loop in the evening with revision and schedule planning.`);
+        return sendResponse(`🧠 **Routine Focus Strategy**:\n1. **Early Win**: Begin with your physical activation (Wake-up & Walking) to stimulate dopamine.\n2. **Deep Anchor**: Tackle core s[...`);
       }
-      return sendResponse(`Hello! I am your **TimeForge AI Agent**. I have full administrative capabilities in Developer mode (modifying streaks, creating/deleting tasks, batch completing dates) and guided routine support in User mode. How can I assist your schedule today?`);
+      return sendResponse(`Hello! I am your **TimeForge AI Agent**. I have full administrative capabilities in Developer mode (modifying streaks, creating/deleting tasks, batch completing dates) and can assist with personal productivity coaching in User mode.`);
     }
 
     // Function declarations for Gemini tool calling
@@ -2428,7 +2737,7 @@ CAPABILITIES:
 
       return res.json({
         success: true,
-        reply: `⚡ **TimeForge Agent Status**:\n• Current Streak: **${streakInfo.streak} days**\n• Today's Routine: **${done}/${todayTasks.length} completed**\n\nI am ready for your commands (e.g. *"Set streak to 5"*, *"Mark today 100%"*, *"Add task"*, *"Check routine status"*).`,
+        reply: `⚡ **TimeForge Agent Status**:\n• Current Streak: **${streakInfo.streak} days**\n• Today's Routine: **${done}/${todayTasks.length} completed**\n\nI am ready for your command.`,
         message: `TimeForge Agent is online. Streak: ${streakInfo.streak} days.`,
         toolResults: [],
         actions_taken: [],
@@ -2593,9 +2902,9 @@ Return ONLY JSON matching:
     return res.json({
       success: true,
       subtasks: [
-        { title: `Part 1: Setup & Initial Research for ${title}`, duration_minutes: blockDuration, priority: 'high', suggested_time_offset_minutes: 0, objective: 'Outline scope and compile reference materials.' },
-        { title: `Part 2: Core Execution & Deep Work for ${title}`, duration_minutes: blockDuration, priority: 'high', suggested_time_offset_minutes: blockDuration + 10, objective: 'Complete core problem solving or drafting.' },
-        { title: `Part 3: Review, Debug & Output Verification`, duration_minutes: Math.max(25, totalMinutes - (blockDuration * 2)), priority: 'medium', suggested_time_offset_minutes: (blockDuration * 2) + 20, objective: 'Polish deliverables and check edge cases.' },
+        { title: `Part 1: Setup & Initial Research for ${title}`, duration_minutes: blockDuration, priority: 'high', suggested_time_offset_minutes: 0, objective: 'Outline scope and compile references' },
+        { title: `Part 2: Core Execution & Deep Work for ${title}`, duration_minutes: blockDuration, priority: 'high', suggested_time_offset_minutes: blockDuration + 10, objective: 'Complete core deliverable' },
+        { title: `Part 3: Review, Debug & Output Verification`, duration_minutes: Math.max(25, totalMinutes - (blockDuration * 2)), priority: 'medium', suggested_time_offset_minutes: (blockDuration * 2) + 20, objective: 'Validate output and clean up final edge cases' },
       ],
       reasoning: 'Separated into initiation, deep sprint, and polish phases to maximize retention and prevent burnout.',
       source: 'heuristic',
@@ -2651,7 +2960,7 @@ Return ONLY JSON with this format:
     return res.json({
       success: true,
       summary: {
-        insight_text: `You achieved an impressive ${completionRate}% completion rate! You finish morning tasks ~40% faster than evening ones. Evening study sessions had the most friction — shifting demanding theory before dinner will optimize your flow state.`,
+        insight_text: `You achieved an impressive ${completionRate}% completion rate! You finish morning tasks ~40% faster than evening ones. Evening study sessions had the most friction — shifting high-cognitive work into earlier training blocks should further increase momentum.`,
         metrics: {
           total_completed: doneTasks,
           completion_rate: completionRate,
