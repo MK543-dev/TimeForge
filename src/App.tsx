@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import { Navbar } from './components/Navbar';
 import { TaskBoard } from './components/TaskBoard';
 import { VisualDiagrams } from './components/VisualDiagrams';
@@ -1029,6 +1030,7 @@ export default function App() {
           </div>
         </div>
       </footer>
+      <Analytics />
     </div>
   );
 }
